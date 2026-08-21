@@ -221,7 +221,7 @@ export default async function handler(req, res) {
             parameters: { type: "object", properties: {} },
           },
         ],
-        max_output_tokens: 250,
+        max_output_tokens: "inf",
         reasoning: { effort: "low" },
       },
     };
