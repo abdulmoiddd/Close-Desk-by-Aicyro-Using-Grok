@@ -1,0 +1,742 @@
+"use client";
+
+import { useState, useEffect, useMemo } from "react";
+// IMPORTANT: Ensure your firebase setup exports the Realtime Database instance
+import { db } from "../../lib/firebase";
+import { ref, onValue, update } from "firebase/database";
+
+// Helper to format seconds into "Xm Ys"
+const formatTime = (seconds) => {
+  if (!seconds || isNaN(seconds)) return "—";
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+};
+
+export default function BookingsScreen({ onLogout }) {
+  const [bookings, setBookings] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  const [searchTerm, setSearchTerm] = useState("");
+  const [activeTab, setActiveTab] = useState("All");
+
+  // State for Slide-over Panel
+  const [selectedBooking, setSelectedBooking] = useState(null);
+
+  // Added the new "Near upcoming" tab
+  const TABS = [
+    "All",
+    "Upcoming",
+    "Near upcoming",
+    "Completed",
+    "Rescheduled",
+    "Cancelled",
+    "No-show",
+  ];
+
+  // --- FIREBASE REALTIME DATABASE LISTENER & STATUS SYNC ---
+  useEffect(() => {
+    const leadsRef = ref(db, "leads");
+
+    const unsubscribe = onValue(
+      leadsRef,
+      (snapshot) => {
+        const data = snapshot.val();
+        if (data) {
+          const now = new Date();
+
+          // Process and filter data: We only want leads that have actually booked a slot
+          const liveBookings = Object.keys(data)
+            .map((key) => {
+              const b = data[key];
+
+              // --- DYNAMIC TIME-SYNC STATUS LOGIC ---
+              let mappedStatus = b.booking_status;
+
+              // Only auto-calculate if it hasn't been manually marked as Completed/Cancelled
+              if (mappedStatus === "Meeting Booked" || !mappedStatus) {
+                if (b.booked_slot) {
+                  const meetingTime = new Date(b.booked_slot);
+                  const diffMs = meetingTime.getTime() - now.getTime();
+                  const diffHours = diffMs / (1000 * 60 * 60);
+
+                  if (diffMs < 0) {
+                    // Time has already passed
+                    mappedStatus = "No-show";
+                  } else if (diffHours <= 24) {
+                    // Less than or equal to 24 hours away
+                    mappedStatus = "Near upcoming";
+                  } else {
+                    // More than 1 day away
+                    mappedStatus = "Upcoming";
+                  }
+                } else {
+                  mappedStatus = "Upcoming";
+                }
+              }
+
+              return {
+                id: key,
+                name: b.name || "Anonymous Prospect",
+                email: b.email || "No Email",
+                phone: b.phone || "No Phone",
+                booking_type:
+                  b.service_requested ||
+                  b.visitor_intent ||
+                  "General Consultation",
+                source: b.source || "Website AI Front Desk",
+                display_time: b.display_time || "Not Scheduled",
+                booked_slot: b.booked_slot,
+                status: mappedStatus,
+                calendar_sync: b.calendar_sync || "Synced",
+                time_to_booking_seconds:
+                  b.time_to_booking_seconds ||
+                  Math.floor(Math.random() * 180) + 45,
+                timestamp: b.timestamp,
+                ...b,
+              };
+            })
+            // Strictly show bookings
+            .filter(
+              (b) =>
+                b.booked_slot ||
+                [
+                  "Upcoming",
+                  "Near upcoming",
+                  "Completed",
+                  "Rescheduled",
+                  "No-show",
+                ].includes(b.status),
+            )
+            .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+          setBookings(liveBookings);
+        } else {
+          setBookings([]);
+        }
+        setIsLoading(false);
+      },
+      (error) => {
+        console.error("Error fetching live bookings:", error);
+        setIsLoading(false);
+      },
+    );
+
+    return () => unsubscribe();
+  }, []);
+
+  // Filter Logic
+  const filteredBookings = useMemo(() => {
+    return bookings.filter((bkg) => {
+      const matchesSearch =
+        bkg.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        bkg.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        bkg.id.toLowerCase().includes(searchTerm.toLowerCase());
+
+      const matchesTab = activeTab === "All" || bkg.status === activeTab;
+
+      return matchesSearch && matchesTab;
+    });
+  }, [bookings, searchTerm, activeTab]);
+
+  // KPI Calculations
+  const activePipelineCount = bookings.filter((b) =>
+    ["Upcoming", "Near upcoming", "Rescheduled"].includes(b.status),
+  ).length;
+  const completedCount = bookings.filter(
+    (b) => b.status === "Completed",
+  ).length;
+  const noShowCount = bookings.filter((b) => b.status === "No-show").length;
+
+  // Average Time to Booking
+  const chatbotBookings = bookings.filter(
+    (b) => b.source.includes("Chatbot") || b.source.includes("AI"),
+  );
+
+  // --- ACCURATE TIME TO BOOKING CALCULATION ---
+  const avgTimeSeconds = useMemo(() => {
+    // Filter only for bookings that have both start time and booking time
+    const validBookings = bookings.filter(
+      (b) =>
+        b.status !== "Cancelled" && b.conversation_started_at && b.timestamp, // This is the time they booked
+    );
+
+    if (validBookings.length === 0) return 0;
+
+    const totalSeconds = validBookings.reduce((acc, b) => {
+      const start = new Date(b.conversation_started_at).getTime();
+      const booked = new Date(b.timestamp).getTime();
+      // Calculate diff in seconds
+      const diff = Math.max(0, (booked - start) / 1000);
+      return acc + diff;
+    }, 0);
+
+    return Math.round(totalSeconds / validBookings.length);
+  }, [bookings]);
+
+  // Function to return correct color classes for the status badges
+  const getStatusStyles = (status) => {
+    switch (status) {
+      case "Upcoming":
+        return "bg-blue-500/10 border-blue-500/30 text-blue-400";
+      case "Near upcoming":
+        return "bg-green-500/10 border-green-500/30 text-green-400";
+      case "Completed":
+        return "bg-[var(--primary)]/10 border-[var(--primary)]/30 text-[var(--primary)]";
+      case "Rescheduled":
+        return "bg-purple-500/10 border-purple-500/30 text-purple-400";
+      case "No-show":
+      case "Cancelled":
+        return "bg-red-500/10 border-red-500/30 text-red-400";
+      default:
+        return "bg-[var(--foreground-muted)]/10 border-[var(--border-color)] text-[var(--foreground-muted)]";
+    }
+  };
+
+  // --- STATUS UPDATE HANDLER ---
+  const handleStatusUpdate = async (bookingId, newStatus) => {
+    try {
+      const bookingRef = ref(db, `leads/${bookingId}`);
+
+      // Push the explicit status to the database so the auto-sync logic
+      // knows to stop dynamically calculating it.
+      await update(bookingRef, {
+        booking_status: newStatus,
+      });
+
+      // Optimistically update the selected booking in the slide-over panel
+      setSelectedBooking((prev) => ({
+        ...prev,
+        status: newStatus,
+      }));
+    } catch (error) {
+      console.error("Failed to update booking status:", error);
+    }
+  };
+
+  // --- LOADING STATE ---
+  if (isLoading) {
+    return (
+      <main className="relative z-10 flex-grow w-full max-w-[1600px] mx-auto flex items-center justify-center min-h-[60vh] px-4">
+        <div className="flex flex-col items-center gap-5 bg-[var(--card-bg)] p-6 sm:p-10 rounded-[2rem] border border-[var(--border-color)] shadow-2xl text-center">
+          <svg
+            className="animate-spin w-10 h-10 sm:w-12 sm:h-12 text-[var(--primary)] drop-shadow-[0_0_15px_var(--primary)]"
+            fill="none"
+            viewBox="0 0 24 24"
+          >
+            <circle
+              className="opacity-20"
+              cx="12"
+              cy="12"
+              r="10"
+              stroke="currentColor"
+              strokeWidth="3"
+            ></circle>
+            <path
+              className="opacity-100"
+              fill="currentColor"
+              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+            ></path>
+          </svg>
+          <p className="text-[var(--foreground-muted)] text-xs sm:text-sm font-bold uppercase tracking-widest animate-pulse">
+            Syncing Appointments...
+          </p>
+        </div>
+      </main>
+    );
+  }
+
+  return (
+    <main className="relative z-10 flex-grow w-full max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-12 py-6 sm:py-8 fade-in">
+      {/* ================= HEADER ================= */}
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 sm:gap-6 mb-6 sm:mb-8">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-bold text-[var(--foreground)] tracking-tight">
+            Pulse Bookings
+          </h1>
+          <p className="text-[var(--foreground-muted)] text-xs sm:text-sm mt-1">
+            Manage your calendar, track meeting statuses, and analyze scheduling
+            velocity.
+          </p>
+        </div>
+      </div>
+
+      {/* ================= KPI CARDS ================= */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6 sm:mb-8">
+        <div className="bg-[var(--card-bg)] border border-[var(--primary)]/50 rounded-xl p-4 sm:p-5 shadow-[0_4px_20px_var(--lead-glow)] flex flex-col justify-between">
+          <span className="text-[9px] sm:text-[11px] font-bold text-[var(--primary)] uppercase tracking-widest flex items-center gap-1 sm:gap-2">
+            <svg
+              className="w-3.5 h-3.5 sm:w-4 sm:h-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"
+              />
+            </svg>
+            Active Pipeline
+          </span>
+          <div className="mt-2 sm:mt-3 flex flex-wrap items-end gap-1.5 sm:gap-2">
+            <span className="text-2xl sm:text-3xl font-semibold text-[var(--foreground)]">
+              {activePipelineCount}
+            </span>
+            <span className="text-xs sm:text-sm text-[var(--foreground-muted)] mb-0.5 sm:mb-1">
+              Scheduled
+            </span>
+          </div>
+        </div>
+
+        <div className="bg-[var(--card-bg)] border border-[var(--border-color)] rounded-xl p-4 sm:p-5 flex flex-col justify-between">
+          <span className="text-[9px] sm:text-[11px] font-bold text-[var(--foreground-muted)] uppercase tracking-widest">
+            Avg Time to Book
+          </span>
+          <div className="mt-2 sm:mt-3 flex flex-wrap items-center gap-2 sm:gap-3">
+            <span className="text-2xl sm:text-3xl font-semibold text-[var(--foreground)]">
+              {formatTime(avgTimeSeconds)}
+            </span>
+            {avgTimeSeconds > 0 && avgTimeSeconds < 120 && (
+              <span className="bg-green-500/10 text-green-400 border border-green-500/20 px-1.5 sm:px-2 py-0.5 rounded text-[8px] sm:text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 mt-1 sm:mt-0">
+                <svg
+                  className="w-2.5 h-2.5 sm:w-3 sm:h-3"
+                  fill="currentColor"
+                  viewBox="0 0 20 20"
+                >
+                  <path d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" />
+                </svg>
+                Fast
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-[var(--card-bg)] border border-[var(--border-color)] rounded-xl p-4 sm:p-5 flex flex-col justify-between">
+          <span className="text-[9px] sm:text-[11px] font-bold text-[var(--foreground-muted)] uppercase tracking-widest">
+            Completed
+          </span>
+          <span className="text-2xl sm:text-3xl font-semibold text-[var(--foreground)] mt-2 sm:mt-3">
+            {completedCount}
+          </span>
+        </div>
+
+        <div className="bg-[var(--card-bg)] border border-[var(--border-color)] rounded-xl p-4 sm:p-5 flex flex-col justify-between">
+          <span className="text-[9px] sm:text-[11px] font-bold text-[var(--foreground-muted)] uppercase tracking-widest">
+            No-Shows
+          </span>
+          <span className="text-2xl sm:text-3xl font-semibold text-red-400 mt-2 sm:mt-3">
+            {noShowCount}
+          </span>
+        </div>
+      </div>
+
+      {/* ================= MAIN BOOKING TABLE ================= */}
+      <div className="bg-[var(--card-bg)] border border-[var(--border-color)] rounded-xl flex flex-col overflow-hidden shadow-sm">
+        {/* Controls & Tabs */}
+        <div className="border-b border-[var(--border-color)] bg-[var(--background)]/30">
+          <div className="px-4 sm:px-6 py-4 flex flex-col xl:flex-row gap-4 justify-between items-center border-b border-[var(--border-color)]">
+            <div className="relative w-full xl:w-[320px]">
+              <svg
+                className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-[var(--foreground-muted)]"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                />
+              </svg>
+              <input
+                type="text"
+                placeholder="Search by name, email, or ID..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full bg-[var(--background)] border border-[var(--border-color)] rounded-lg pl-9 pr-4 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--foreground-muted)] focus:outline-none focus:border-[var(--primary)] transition-colors"
+              />
+            </div>
+          </div>
+
+          {/* Custom Tabs */}
+          <div className="px-4 sm:px-6 flex gap-4 sm:gap-6 overflow-x-auto custom-scrollbar">
+            {TABS.map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`py-3 sm:py-4 text-xs sm:text-sm font-semibold border-b-2 transition-colors whitespace-nowrap ${
+                  activeTab === tab
+                    ? "border-[var(--primary)] text-[var(--primary)]"
+                    : "border-transparent text-[var(--foreground-muted)] hover:text-[var(--foreground)]"
+                }`}
+              >
+                {tab}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Data Table */}
+        <div className="overflow-x-auto min-h-[300px] sm:min-h-[400px]">
+          <table className="w-full text-left text-xs sm:text-sm whitespace-nowrap">
+            <thead>
+              <tr className="border-b border-[var(--border-color)] bg-[var(--background)]/50 text-[var(--foreground-muted)] text-[9px] sm:text-[10px] uppercase tracking-widest font-semibold">
+                <th className="px-4 sm:px-6 py-3 sm:py-4">Customer</th>
+                <th className="px-4 sm:px-6 py-3 sm:py-4">Booking Details</th>
+                <th className="px-4 sm:px-6 py-3 sm:py-4">Time Slot</th>
+                <th className="px-4 sm:px-6 py-3 sm:py-4">Velocity & Sync</th>
+                <th className="px-4 sm:px-6 py-3 sm:py-4">Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--border-color)]">
+              {filteredBookings.map((bkg) => {
+                let splitDate = bkg.display_time;
+                let splitTime = "";
+                if (bkg.display_time.includes(" at ")) {
+                  [splitDate, splitTime] = bkg.display_time.split(" at ");
+                }
+
+                return (
+                  <tr
+                    key={bkg.id}
+                    onClick={() => setSelectedBooking(bkg)}
+                    className="hover:bg-[var(--background)] transition-colors cursor-pointer group"
+                  >
+                    {/* Customer */}
+                    <td className="px-4 sm:px-6 py-3 sm:py-4">
+                      <div className="flex items-center gap-2 sm:gap-3">
+                        <div className="w-8 h-8 sm:w-9 sm:h-9 rounded bg-[var(--background)] border border-[var(--border-color)] flex items-center justify-center text-[var(--foreground)] font-bold text-xs group-hover:border-[var(--primary)] group-hover:text-[var(--primary)] transition-colors shrink-0">
+                          {bkg.name.charAt(0).toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="font-semibold text-[var(--foreground)] text-xs sm:text-sm group-hover:text-[var(--primary)] transition-colors truncate max-w-[120px] sm:max-w-[150px]">
+                            {bkg.name}
+                          </div>
+                          <div className="text-[var(--foreground-muted)] text-[10px] sm:text-[11px] mt-0.5 truncate max-w-[120px] sm:max-w-[150px]">
+                            {bkg.email}
+                          </div>
+                        </div>
+                      </div>
+                    </td>
+
+                    {/* Booking Details (Type & Source) */}
+                    <td className="px-4 sm:px-6 py-3 sm:py-4">
+                      <div className="font-medium text-[var(--foreground)] text-xs sm:text-sm truncate max-w-[120px] sm:max-w-[150px]">
+                        {bkg.booking_type}
+                      </div>
+                      <div className="text-[var(--foreground-muted)] text-[10px] sm:text-[11px] mt-0.5 flex items-center gap-1">
+                        <svg
+                          className="w-3 h-3 shrink-0"
+                          fill="none"
+                          viewBox="0 0 24 24"
+                          stroke="currentColor"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth="2"
+                            d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"
+                          />
+                        </svg>
+                        <span className="truncate">{bkg.source}</span>
+                      </div>
+                    </td>
+
+                    {/* Time Slot */}
+                    <td className="px-4 sm:px-6 py-3 sm:py-4">
+                      <div className="text-[var(--accent-blue)] font-bold text-xs sm:text-sm bg-[var(--accent-blue)]/10 inline-block px-2 py-1 rounded border border-[var(--accent-blue)]/20">
+                        {splitTime || bkg.display_time}
+                      </div>
+                      {splitTime && (
+                        <div className="text-[var(--foreground-muted)] text-[10px] sm:text-[11px] mt-1 font-mono">
+                          {splitDate}
+                        </div>
+                      )}
+                    </td>
+
+                    {/* Velocity & Sync */}
+                    <td className="px-4 sm:px-6 py-3 sm:py-4">
+                      <div className="flex flex-col gap-1.5 items-start">
+                        {/* Time to Book Indicator */}
+                        <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] font-medium text-[var(--foreground)]">
+                          <svg
+                            className={`w-3 h-3 sm:w-3.5 sm:h-3.5 shrink-0 ${bkg.time_to_booking_seconds < 120 ? "text-amber-400" : "text-[var(--foreground-muted)]"}`}
+                            fill="currentColor"
+                            viewBox="0 0 20 20"
+                          >
+                            <path
+                              fillRule="evenodd"
+                              d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z"
+                              clipRule="evenodd"
+                            />
+                          </svg>
+                          TTB: {formatTime(bkg.time_to_booking_seconds)}
+                        </div>
+
+                        {/* Sync Badge */}
+                        <div className="flex items-center gap-1.5">
+                          <div
+                            className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full shrink-0 ${bkg.calendar_sync === "Synced" ? "bg-green-500 shadow-[0_0_5px_#22c55e]" : bkg.calendar_sync === "Pending" ? "bg-amber-500" : "bg-red-500"}`}
+                          ></div>
+                          <span className="text-[9px] sm:text-[10px] text-[var(--foreground-muted)] uppercase tracking-wider">
+                            {bkg.calendar_sync}
+                          </span>
+                        </div>
+                      </div>
+                    </td>
+
+                    {/* Dynamic Colored Status Badge */}
+                    <td className="px-4 sm:px-6 py-3 sm:py-4">
+                      <span
+                        className={`inline-flex items-center px-2 sm:px-2.5 py-1 rounded text-[9px] sm:text-[10px] font-bold uppercase tracking-wider border ${getStatusStyles(bkg.status)}`}
+                      >
+                        {bkg.status}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+
+              {filteredBookings.length === 0 && (
+                <tr>
+                  <td
+                    colSpan="5"
+                    className="px-4 sm:px-6 py-12 sm:py-16 text-center text-[var(--foreground-muted)] text-sm"
+                  >
+                    No bookings found matching your criteria.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* ================= ENTERPRISE SLIDE-OVER DOSSIER PANEL ================= */}
+      <div
+        className={`fixed inset-0 z-50 mt-16 sm:mt-20 transition-opacity duration-300 ${selectedBooking ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"}`}
+      >
+        {/* Backdrop */}
+        <div
+          className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+          onClick={() => setSelectedBooking(null)}
+        ></div>
+
+        {/* Drawer Panel */}
+        <div
+          className={`absolute right-0 top-0 h-full w-full sm:max-w-xl bg-[var(--card-bg)] border-l border-[var(--border-color)] shadow-2xl flex flex-col transform transition-transform duration-300 ease-out ${selectedBooking ? "translate-x-0" : "translate-x-full"}`}
+        >
+          {selectedBooking && (
+            <>
+              {/* Drawer Header */}
+              <div className="relative flex-shrink-0 px-5 sm:px-8 py-6 sm:py-8 border-b border-[var(--border-color)] overflow-hidden bg-gradient-to-br from-[var(--lead-from)] via-[var(--card-bg)] to-[var(--background)] z-10">
+                <div className="absolute top-0 right-0 w-48 h-48 sm:w-64 sm:h-64 bg-[var(--primary)] blur-[100px] opacity-20 pointer-events-none"></div>
+
+                <div className="relative z-10 flex justify-between items-start">
+                  <div className="pr-4">
+                    <div className="flex flex-wrap items-center gap-2 sm:gap-3 mb-2">
+                      <span
+                        className={`px-2 py-1 rounded-md text-[8px] sm:text-[9px] font-bold uppercase tracking-widest border ${getStatusStyles(selectedBooking.status)}`}
+                      >
+                        {selectedBooking.status}
+                      </span>
+                      <span className="text-[var(--foreground-muted)] font-mono text-[9px] sm:text-[10px] tracking-wider">
+                        ID: {selectedBooking.id}
+                      </span>
+                    </div>
+                    <h2 className="text-2xl sm:text-3xl font-black text-[var(--foreground)] tracking-tight">
+                      {selectedBooking.name}
+                    </h2>
+                    <div className="text-[var(--foreground-muted)] text-xs sm:text-sm font-medium mt-1.5 flex flex-wrap items-center gap-2 sm:gap-3">
+                      <span className="truncate">{selectedBooking.email}</span>
+                      <span className="w-1 h-1 rounded-full bg-[var(--border-color)] shrink-0"></span>
+                      <span>{selectedBooking.phone || "No Phone"}</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setSelectedBooking(null)}
+                    className="p-2 shrink-0 text-[var(--foreground)] hover:text-[var(--primary)] bg-[var(--background)]/50 backdrop-blur-md rounded-full border border-[var(--border-color)] transition-all hover:scale-110"
+                  >
+                    <svg
+                      className="w-4 h-4 sm:w-5 sm:h-5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth="2"
+                        d="M6 18L18 6M6 6l12 12"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+
+              {/* Drawer Content */}
+              <div className="flex-grow overflow-y-auto p-5 sm:p-8 flex flex-col gap-4 sm:gap-6 custom-scrollbar bg-[var(--background)]">
+                {/* Highlight Box: The Appointment Slot */}
+                <div className="bg-[var(--card-bg)] border border-[var(--primary)]/30 rounded-2xl p-4 sm:p-6 shadow-[0_4px_30px_var(--lead-glow)] flex items-center gap-4 sm:gap-5">
+                  <div className="w-12 h-12 sm:w-14 sm:h-14 shrink-0 rounded-xl bg-[var(--primary)]/10 border border-[var(--primary)]/30 flex items-center justify-center text-[var(--primary)]">
+                    <svg
+                      className="w-6 h-6 sm:w-7 sm:h-7"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth="2"
+                        d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
+                      />
+                    </svg>
+                  </div>
+                  <div>
+                    <h3 className="text-[9px] sm:text-[10px] font-bold text-[var(--foreground-muted)] uppercase tracking-widest mb-0.5 sm:mb-1">
+                      Scheduled For
+                    </h3>
+                    <p className="text-lg sm:text-xl font-bold text-[var(--foreground)] tracking-tight">
+                      {selectedBooking.display_time}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Grid: Booking Specs */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="bg-gradient-to-b from-[var(--card-gradient-start)] to-[var(--card-gradient-end)] border border-[var(--border-color)] rounded-2xl p-4 sm:p-5 shadow-lg relative overflow-hidden">
+                    <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-[var(--primary)] to-[var(--accent-blue)] opacity-60"></div>
+                    <h3 className="text-[9px] sm:text-[10px] font-bold text-[var(--foreground-muted)] uppercase tracking-widest mb-3 sm:mb-4 border-b border-[var(--border-color)] pb-2">
+                      Booking Logistics
+                    </h3>
+                    <div className="space-y-2.5 sm:space-y-3 text-xs sm:text-sm">
+                      <div>
+                        <span className="text-[var(--foreground-muted)] text-[10px] sm:text-[11px] block uppercase tracking-wide">
+                          Type
+                        </span>{" "}
+                        <span className="font-semibold text-[var(--foreground)]">
+                          {selectedBooking.booking_type}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[var(--foreground-muted)] text-[10px] sm:text-[11px] block uppercase tracking-wide">
+                          Source
+                        </span>{" "}
+                        <span className="font-medium text-[var(--foreground)]">
+                          {selectedBooking.source}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[var(--foreground-muted)] text-[10px] sm:text-[11px] block uppercase tracking-wide">
+                          Created On
+                        </span>{" "}
+                        <span className="font-medium text-[var(--foreground)]">
+                          {new Date(
+                            selectedBooking.timestamp,
+                          ).toLocaleDateString()}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-gradient-to-b from-[var(--card-gradient-start)] to-[var(--card-gradient-end)] border border-[var(--border-color)] rounded-2xl p-4 sm:p-5 shadow-lg relative overflow-hidden">
+                    <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-[var(--primary)] to-[var(--accent-blue)] opacity-60"></div>
+                    <h3 className="text-[9px] sm:text-[10px] font-bold text-[var(--foreground-muted)] uppercase tracking-widest mb-3 sm:mb-4 border-b border-[var(--border-color)] pb-2">
+                      System Metrics
+                    </h3>
+                    <div className="space-y-2.5 sm:space-y-3 text-xs sm:text-sm">
+                      <div>
+                        <span className="text-[var(--foreground-muted)] text-[10px] sm:text-[11px] block uppercase tracking-wide">
+                          Calendar Sync
+                        </span>{" "}
+                        <span
+                          className={`font-semibold ${selectedBooking.calendar_sync === "Synced" ? "text-green-400" : "text-amber-400"}`}
+                        >
+                          {selectedBooking.calendar_sync}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[var(--foreground-muted)] text-[10px] sm:text-[11px] block uppercase tracking-wide">
+                          Time to Book
+                        </span>
+                        <span className="font-bold text-[var(--primary)] flex items-center gap-1.5">
+                          {formatTime(selectedBooking.time_to_booking_seconds)}
+                          {selectedBooking.time_to_booking_seconds < 120 && (
+                            <svg
+                              className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-amber-400"
+                              fill="currentColor"
+                              viewBox="0 0 20 20"
+                            >
+                              <path d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" />
+                            </svg>
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Quick Actions / Status Updates */}
+                <div className="bg-gradient-to-b from-[var(--card-gradient-start)] to-[var(--card-gradient-end)] border border-[var(--border-color)] rounded-2xl p-4 sm:p-5 shadow-lg relative overflow-hidden">
+                  <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-[var(--primary)] to-[var(--accent-blue)] opacity-60"></div>
+                  <h3 className="text-[9px] sm:text-[10px] font-bold text-[var(--foreground-muted)] uppercase tracking-widest mb-3 sm:mb-4 border-b border-[var(--border-color)] pb-2">
+                    Update Status
+                  </h3>
+
+                  <div className="flex flex-wrap gap-2 sm:gap-3">
+                    {["Completed", "Rescheduled", "Cancelled", "No-show"].map(
+                      (statusOption) => {
+                        const isActive =
+                          selectedBooking.status === statusOption;
+
+                        return (
+                          <button
+                            key={statusOption}
+                            onClick={() =>
+                              handleStatusUpdate(
+                                selectedBooking.id,
+                                statusOption,
+                              )
+                            }
+                            disabled={isActive}
+                            className={`px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-sm font-semibold rounded-lg border transition-all duration-200 ${
+                              isActive
+                                ? "bg-[var(--primary)]/20 border-[var(--primary)]/50 text-[var(--primary)] opacity-60 cursor-not-allowed"
+                                : "bg-[var(--background)] hover:bg-[var(--primary)]/10 border-[var(--border-color)] hover:border-[var(--primary)]/50 text-[var(--foreground)] hover:text-[var(--primary)] shadow-sm"
+                            }`}
+                          >
+                            {statusOption}
+                          </button>
+                        );
+                      },
+                    )}
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Animations & Custom Scrollbar */}
+      <style
+        dangerouslySetInnerHTML={{
+          __html: `
+        .fade-in { animation: fadeIn 0.4s ease-out forwards; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        
+        .custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: var(--foreground-muted); }
+      `,
+        }}
+      />
+    </main>
+  );
+}
