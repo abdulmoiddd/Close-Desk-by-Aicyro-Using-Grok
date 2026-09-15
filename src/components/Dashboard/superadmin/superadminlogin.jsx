@@ -1,0 +1,279 @@
+// src/components/Dashboard/superadmin/superadminlogin.jsx
+"use client";
+
+import { useState, useEffect } from "react";
+import { ref, get } from "firebase/database";
+import { db } from "../../../lib/firebase";
+
+import { createWebsiteLogger } from "../../../lib/loggerPresets";
+import { generateCorrelationId } from "../../../lib/tracer";
+
+const baseLogger = createWebsiteLogger("SuperAdminLogin");
+
+const THEME_HUES = [
+  { id: "default", name: "Default", color: "#8a2be2" },
+  { id: "red", name: "Red", color: "#ef4444" },
+  { id: "orange", name: "Orange", color: "#f97316" },
+  { id: "yellow", name: "Yellow", color: "#f59e0b" },
+  { id: "green", name: "Green", color: "#10b981" },
+  { id: "blue", name: "Blue", color: "#3b82f6" },
+  { id: "indigo", name: "Indigo", color: "#6366f1" },
+  { id: "violet", name: "Violet", color: "#8b5cf6" },
+];
+
+const applyThemeToDOM = (mode, hue, shade) => {
+  let resolvedMode = mode;
+  if (resolvedMode === "system") {
+    resolvedMode = window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
+  }
+  const themeString =
+    hue === "default"
+      ? resolvedMode === "dark"
+        ? "dark"
+        : "light"
+      : `${hue}-${resolvedMode}`;
+  document.documentElement.setAttribute("data-theme", themeString);
+  const baseColor = THEME_HUES.find((h) => h.id === hue)?.color || "#8a2be2";
+  let adjustedPrimary = baseColor,
+    adjustedSecondary = baseColor;
+
+  if (shade !== 500) {
+    const isDark = shade > 500;
+    const intensity = Math.abs(shade - 500) / 450;
+    if (isDark) {
+      adjustedPrimary = `color-mix(in srgb, black ${intensity * 70}%, ${baseColor})`;
+      adjustedSecondary = `color-mix(in srgb, black ${Math.min(100, intensity * 70 + 15)}%, ${baseColor})`;
+    } else {
+      adjustedPrimary = `color-mix(in srgb, white ${intensity * 85}%, ${baseColor})`;
+      adjustedSecondary = `color-mix(in srgb, white ${Math.max(0, intensity * 85 - 10)}%, ${baseColor})`;
+    }
+  }
+  document.documentElement.style.setProperty("--primary", adjustedPrimary);
+  document.documentElement.style.setProperty("--secondary", adjustedSecondary);
+};
+
+export default function SuperAdminLoginScreen({
+  onLoginSuccess,
+  onNavigateToUserLogin,
+}) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", "light");
+    document.documentElement.style.removeProperty("--primary");
+    document.documentElement.style.removeProperty("--secondary");
+
+    const fetchTheme = async () => {
+      try {
+        const lastAdmin = localStorage.getItem("currentSuperAdmin") || "admin";
+        const appearanceRef = ref(
+          db,
+          `superAdminSettings/${lastAdmin}/appearance`,
+        );
+        const snapshot = await get(appearanceRef);
+
+        if (snapshot.exists()) {
+          const data = snapshot.val();
+          applyThemeToDOM(
+            data.mode || "light",
+            data.hue || "default",
+            data.shade || 500,
+          );
+        } else {
+          const saved = JSON.parse(
+            localStorage.getItem("aicyro_appearance_superadmin"),
+          );
+          if (saved) {
+            applyThemeToDOM(
+              saved.mode || "light",
+              saved.hue || "default",
+              saved.shade || 500,
+            );
+          }
+        }
+      } catch (error) {
+        baseLogger.error("theme", "load_failed", { error });
+      }
+    };
+
+    fetchTheme();
+  }, []);
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+
+    const txId = generateCorrelationId();
+    const txLogger = baseLogger.child({
+      correlation: { correlation_id: txId },
+    });
+
+    setIsLoading(true);
+    setError("");
+
+    txLogger.info("auth", "superadmin_login_attempt", {
+      context: { user_id: username },
+    });
+
+    try {
+      const adminRef = ref(db, "superAdmin");
+      const snapshot = await get(adminRef);
+
+      if (snapshot.exists()) {
+        const adminData = snapshot.val();
+        const matchedAdmin = adminData.find(
+          (admin) =>
+            admin && admin.name === username && admin.password === password,
+        );
+
+        if (matchedAdmin) {
+          localStorage.setItem("currentSuperAdmin", matchedAdmin.name);
+          txLogger.info("auth", "superadmin_login_success", {
+            context: { user_id: username },
+          });
+          onLoginSuccess();
+        } else {
+          txLogger.warn("auth", "superadmin_login_invalid", {
+            context: { user_id: username },
+          });
+          setError("Invalid super admin credentials.");
+        }
+      } else {
+        txLogger.error("auth", "superadmin_db_unavailable", {
+          context: { user_id: username },
+        });
+        setError("Error connecting to the authentication server.");
+      }
+    } catch (err) {
+      txLogger.error("auth", "superadmin_login_error", {
+        error: err,
+        context: { user_id: username },
+      });
+      setError("A network error occurred. Please try again.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-[var(--background)] p-4 font-sans text-[var(--foreground)] relative overflow-hidden transition-colors duration-300">
+      {/* Ambient Background Glow */}
+      <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+        <div className="w-[50vw] h-[50vw] bg-[var(--primary)] opacity-10 blur-[120px] rounded-full mix-blend-screen transition-colors duration-300"></div>
+      </div>
+
+      <div className="w-full max-w-md bg-[var(--card-bg)] border border-[var(--border-color)] rounded-3xl p-8 sm:p-10 shadow-2xl relative z-10 transition-colors duration-300">
+        {/* Logo and Header */}
+        <div className="flex flex-col items-center mb-8">
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-[var(--primary)] to-[var(--secondary)] flex items-center justify-center text-white shadow-[0_0_20px_var(--lead-glow)] mb-4 transition-all duration-300">
+            <svg
+              width="32"
+              height="32"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+            </svg>
+          </div>
+          <h1 className="text-2xl font-black tracking-tight text-[var(--foreground)]">
+            Super Admin Portal
+          </h1>
+          <p className="text-[var(--foreground-muted)] text-sm mt-1 font-medium">
+            Restricted access. Sign in to continue.
+          </p>
+        </div>
+
+        {/* Login Form */}
+        <form onSubmit={handleLogin} className="space-y-5">
+          <div>
+            <label
+              htmlFor="username"
+              className="block text-xs font-bold text-[var(--foreground-muted)] uppercase tracking-wider mb-2"
+            >
+              Username
+            </label>
+            <input
+              id="username"
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              className="w-full bg-[var(--background)] border border-[var(--border-color)] text-[var(--foreground)] px-4 py-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-[var(--primary)]/50 focus:border-[var(--primary)] transition-all font-medium"
+              placeholder="Enter admin username"
+              required
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="password"
+              className="block text-xs font-bold text-[var(--foreground-muted)] uppercase tracking-wider mb-2"
+            >
+              Password
+            </label>
+            <input
+              id="password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full bg-[var(--background)] border border-[var(--border-color)] text-[var(--foreground)] px-4 py-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-[var(--primary)]/50 focus:border-[var(--primary)] transition-all font-medium"
+              placeholder="••••••••"
+              required
+            />
+          </div>
+
+          {/* Error Message Display using strict CSS vars for red */}
+          {error && (
+            <div className="bg-[var(--logo-politico-red)]/10 border border-[var(--logo-politico-red)]/20 text-[var(--logo-politico-red)] text-xs font-bold px-4 py-3 rounded-xl text-center">
+              {error}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={isLoading}
+            className="w-full bg-[var(--primary)] text-white font-bold py-3.5 rounded-xl shadow-[0_4px_15px_var(--lead-glow)] hover:opacity-90 active:scale-[0.98] transition-all flex items-center justify-center gap-2 mt-2 disabled:opacity-70 disabled:cursor-not-allowed"
+          >
+            {isLoading ? (
+              <>
+                <svg
+                  className="w-5 h-5 animate-spin"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                </svg>
+                Authenticating...
+              </>
+            ) : (
+              "Secure Admin Login"
+            )}
+          </button>
+        </form>
+
+        {/* Link back to standard User Login */}
+        <div className="mt-8 pt-6 border-t border-[var(--border-color)] text-center">
+          <p className="text-xs text-[var(--foreground-muted)] font-medium">
+            Not a super admin?{" "}
+            <button
+              type="button"
+              onClick={onNavigateToUserLogin}
+              className="text-[var(--primary)] font-bold hover:underline transition-all bg-transparent border-none p-0 cursor-pointer"
+            >
+              Standard Login
+            </button>
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}

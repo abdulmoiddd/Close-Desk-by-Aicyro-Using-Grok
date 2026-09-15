@@ -1,0 +1,16 @@
+{
+  "login": {
+    "1": {
+      "name": "root",
+      "password": "admin"
+    },
+    "2": {
+      "name": "admin",
+      "password": "root"
+    },
+    "3": {
+      "name": "moid",
+      "password": "moid"
+    }
+  }
+}
