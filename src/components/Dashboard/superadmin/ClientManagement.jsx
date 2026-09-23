@@ -1,8 +1,14 @@
+// src/components/Dashboard/superadmin/ClientManagement.jsx
 "use client";
 
 import React, { useState, useEffect } from "react";
 import { ref, get, set, update } from "firebase/database";
-import { db } from "../../../lib/firebase"; // Adjust path if needed
+import { db } from "../../../lib/firebase";
+
+// 🔥 TICKET 14
+import { createPulseLogger } from "../../../lib/loggerPresets";
+import { recordAuditTrail } from "../../../lib/auditTracer";
+const pulseLogger = createPulseLogger("ClientManagement");
 
 export default function ClientManagement() {
   const [clients, setClients] = useState([]);
@@ -30,9 +36,8 @@ export default function ClientManagement() {
   const [newPassword, setNewPassword] = useState("");
   const [isAddingUser, setIsAddingUser] = useState(false);
   const [newUser, setNewUser] = useState({ name: "", password: "" });
-  const [revealedPasswords, setRevealedPasswords] = useState(new Set()); // Tracks which user indexes are revealed
+  const [revealedPasswords, setRevealedPasswords] = useState(new Set()); 
 
-  // --- FETCH DATA FROM FIREBASE ON MOUNT ---
   useEffect(() => {
     const fetchClientData = async () => {
       try {
@@ -76,13 +81,11 @@ export default function ClientManagement() {
     fetchClientData();
   }, []);
 
-  // --- PIN VERIFICATION LOGIC ---
   const requestPinAuth = (actionPayload) => {
     setPinModal({ isOpen: true, action: actionPayload, error: "" });
     setPinInput("");
   };
 
-  // Standalone verify function so it can be called on typing the 4th digit
   const verifyPin = async (pinToVerify) => {
     setActionLoading(true);
     try {
@@ -94,17 +97,15 @@ export default function ClientManagement() {
         const admin = admins.find((a) => a && a.name === currentAdminName);
 
         if (admin && admin.pin === pinToVerify) {
-          // Success! Execute the pending action
           executeSecuredAction(pinModal.action);
           setPinModal({ isOpen: false, action: null, error: "" });
-          setPinInput(""); // clear on success
+          setPinInput(""); 
         } else {
-          // Fail
           setPinModal((prev) => ({
             ...prev,
             error: "Invalid PIN. Access denied.",
           }));
-          setPinInput(""); // Auto-clear so they can type again immediately
+          setPinInput(""); 
         }
       }
     } catch (error) {
@@ -120,17 +121,14 @@ export default function ClientManagement() {
   };
 
   const handlePinChange = (e) => {
-    // Only allow digits and slice at exactly 4 characters
     const val = e.target.value.replace(/\D/g, "").slice(0, 4);
     setPinInput(val);
 
-    // Auto-verify as soon as 4 digits are typed
     if (val.length === 4) {
       verifyPin(val);
     }
   };
 
-  // Fallback for form submission if they press enter really fast
   const handlePinSubmit = (e) => {
     e.preventDefault();
     if (pinInput.length === 4) {
@@ -159,7 +157,6 @@ export default function ClientManagement() {
     }
   };
 
-  // --- HELPER TO SAVE USERS ---
   const saveUsersToFirebase = async (updatedUsersArray) => {
     try {
       setActionLoading(true);
@@ -173,13 +170,21 @@ export default function ClientManagement() {
     }
   };
 
-  // --- USER HANDLERS ---
   const handleSavePassword = async () => {
     if (!newPassword.trim()) return;
     const updatedClients = [...clients];
     const targetUsers = updatedClients[editingUser.clientIndex].users;
     targetUsers[editingUser.userIndex].password = newPassword;
     await saveUsersToFirebase(targetUsers);
+    
+    // 🚨 TICKET 14: Log User Role / Password Changes
+    recordAuditTrail(pulseLogger, "user_role_changed", {
+      who: localStorage.getItem("currentSuperAdmin") || "superadmin",
+      target: `client_${editingUser.clientIndex}_user_${editingUser.userIndex}`,
+      status: "success",
+      reason: "Password updated"
+    });
+
     setClients(updatedClients);
     setEditingUser(null);
     setNewPassword("");
@@ -191,6 +196,16 @@ export default function ClientManagement() {
     const targetUsers = updatedClients[clientIndex].users;
     targetUsers.push(newUser);
     await saveUsersToFirebase(targetUsers);
+
+    // 🚨 TICKET 14: Log Client Updated (User Addition)
+    recordAuditTrail(pulseLogger, "client_updated", {
+      who: localStorage.getItem("currentSuperAdmin") || "superadmin",
+      target: `client_${clientIndex}`,
+      newState: newUser,
+      status: "success",
+      reason: "New user allocated"
+    });
+
     setClients(updatedClients);
     setNewUser({ name: "", password: "" });
     setIsAddingUser(false);
@@ -200,36 +215,49 @@ export default function ClientManagement() {
     if (!window.confirm("Are you sure you want to delete this user?")) return;
     const updatedClients = [...clients];
     const targetUsers = updatedClients[clientIndex].users;
+    
+    // 🚨 TICKET 14: Store what is being deleted first so it can be logged!
+    const userBeingDeleted = targetUsers[userIndex];
+    
     targetUsers.splice(userIndex, 1);
     await saveUsersToFirebase(targetUsers);
+
+    // 🚨 TICKET 14: Log Data Deletion
+    recordAuditTrail(pulseLogger, "data_deleted", {
+      who: localStorage.getItem("currentSuperAdmin") || "superadmin",
+      target: `client_${clientIndex}_user_${userIndex}`,
+      previousState: userBeingDeleted,
+      status: "success"
+    });
+
     setClients(updatedClients);
   };
 
-  // --- PROFILE HANDLERS ---
   const handleSaveProfile = async () => {
     setActionLoading(true);
     try {
-      // Map flat profile data back to Firebase schema
       const updates = {
-        "settings/business_profile/basic_info/address":
-          editedProfileData.address,
-        "settings/business_profile/basic_info/avgJobValue":
-          editedProfileData.avgJobValue,
-        "settings/business_profile/basic_info/businessName":
-          editedProfileData.businessName,
+        "settings/business_profile/basic_info/address": editedProfileData.address,
+        "settings/business_profile/basic_info/avgJobValue": editedProfileData.avgJobValue,
+        "settings/business_profile/basic_info/businessName": editedProfileData.businessName,
         "settings/business_profile/basic_info/email": editedProfileData.email,
-        "settings/business_profile/basic_info/industry":
-          editedProfileData.industry,
+        "settings/business_profile/basic_info/industry": editedProfileData.industry,
         "settings/business_profile/basic_info/phone": editedProfileData.phone,
-        "settings/business_profile/basic_info/website":
-          editedProfileData.website,
+        "settings/business_profile/basic_info/website": editedProfileData.website,
         "settings/business_profile/timezone": editedProfileData.timezone,
         "settings/business_profile/updated_at": new Date().toISOString(),
       };
 
       await update(ref(db), updates);
 
-      // Update local state
+      // 🚨 TICKET 14: Log configuration/profile changes
+      recordAuditTrail(pulseLogger, "configuration_changed", {
+        who: localStorage.getItem("currentSuperAdmin") || "superadmin",
+        target: "settings/business_profile",
+        previousState: clients[0].profile,
+        newState: editedProfileData
+      });
+
       const updatedClients = [...clients];
       updatedClients[0].profile = {
         ...editedProfileData,
@@ -256,7 +284,7 @@ export default function ClientManagement() {
     setManagingUsers(null);
     setEditingUser(null);
     setIsAddingUser(false);
-    setRevealedPasswords(new Set()); // Hide all passwords on close
+    setRevealedPasswords(new Set()); 
   };
 
   if (isLoading) {
@@ -312,7 +340,6 @@ export default function ClientManagement() {
         </button>
       </div>
 
-      {/* --- CLIENTS GRID --- */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {clients.map((client, cIdx) => (
           <div
@@ -388,11 +415,6 @@ export default function ClientManagement() {
         ))}
       </div>
 
-      {/* ==============================================================
-          MODALS
-      ============================================================== */}
-
-      {/* 1. VIEW / EDIT PROFILE MODAL */}
       {viewingProfile && (
         <div className="fixed inset-0 z-40 flex items-center justify-center p-4">
           <div
@@ -453,7 +475,6 @@ export default function ClientManagement() {
             </div>
 
             {isEditingProfile ? (
-              // EDIT MODE
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {Object.keys(editedProfileData).map((key) => {
                   if (key === "updated_at") return null;
@@ -494,7 +515,6 @@ export default function ClientManagement() {
                 </div>
               </div>
             ) : (
-              // VIEW MODE
               <div className="grid grid-cols-1 md:grid-cols-2 gap-y-4 gap-x-6">
                 {Object.entries(viewingProfile.profile).map(([key, value]) => {
                   if (typeof value === "object") return null;
@@ -518,7 +538,6 @@ export default function ClientManagement() {
         </div>
       )}
 
-      {/* 2. MANAGE USERS MODAL */}
       {managingUsers && (
         <div className="fixed inset-0 z-40 flex items-center justify-center p-4">
           <div
@@ -572,7 +591,6 @@ export default function ClientManagement() {
                   </div>
 
                   {editingUser?.userIndex === uIdx ? (
-                    // EDIT PASSWORD MODE
                     <div className="flex items-center gap-2">
                       <input
                         type="text"
@@ -622,7 +640,6 @@ export default function ClientManagement() {
                       </button>
                     </div>
                   ) : (
-                    // VIEW MODE (With Eye & Edit Lock)
                     <div className="flex items-center gap-2">
                       <div className="px-3 py-1.5 bg-[var(--card-bg)] border border-[var(--border-color)] rounded-lg text-xs font-mono text-[var(--foreground-muted)] min-w-[80px] text-center">
                         {revealedPasswords.has(uIdx) ? (
@@ -634,19 +651,16 @@ export default function ClientManagement() {
                         )}
                       </div>
 
-                      {/* EYE ICON (Requires PIN if hidden) */}
                       <button
                         disabled={actionLoading}
                         onClick={() => {
                           if (revealedPasswords.has(uIdx)) {
-                            // Hide it (no PIN needed to hide)
                             setRevealedPasswords((prev) => {
                               const newSet = new Set(prev);
                               newSet.delete(uIdx);
                               return newSet;
                             });
                           } else {
-                            // Ask for PIN to reveal
                             requestPinAuth({
                               type: "REVEAL_PASSWORD",
                               userIndex: uIdx,
@@ -696,7 +710,6 @@ export default function ClientManagement() {
                         )}
                       </button>
 
-                      {/* EDIT PASSWORD ICON (Requires PIN) */}
                       <button
                         disabled={actionLoading}
                         onClick={() =>
@@ -827,7 +840,6 @@ export default function ClientManagement() {
         </div>
       )}
 
-      {/* 3. SECURITY PIN MODAL */}
       {pinModal.isOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
           <div

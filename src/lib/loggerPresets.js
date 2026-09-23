@@ -7,7 +7,7 @@ const getClientSessionId = () => {
   return undefined;
 };
 
-// 🚨 TICKET 3: Automatically attach browser/device context
+// 🚨 TICKET 3 & 22: Automatically attach browser/device/build context
 const getClientContext = () => {
   if (typeof window === "undefined") return {};
 
@@ -27,7 +27,9 @@ const getClientContext = () => {
     device_type,
     viewport: `${window.innerWidth}x${window.innerHeight}`,
     page_url: window.location.href,
-    app_version: process.env.NEXT_PUBLIC_APP_VERSION || "1.0.0", // Attach build version
+    // 🚨 TICKET 22: Fallbacks mapping for client-side environments
+    application_version: process.env.NEXT_PUBLIC_APP_VERSION || "1.0.0", 
+    build_id: process.env.NEXT_PUBLIC_BUILD_ID || "local_build",
   };
 };
 

@@ -1,7 +1,7 @@
+// src/components/Dashboard/BookingsScreen.jsx
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-// IMPORTANT: Ensure your firebase setup exports the Realtime Database instance
 import { db } from "../../lib/firebase";
 import { ref, onValue, update } from "firebase/database";
 
@@ -52,20 +52,20 @@ export default function BookingsScreen({ onLogout }) {
               let mappedStatus = b.booking_status || "";
               const lowerStatus = mappedStatus.toLowerCase().trim();
 
-              // Parse date from either booked_slot or preferred_date/time
+              // Unified Date Parsing (Matches Home, Terminal, and Report logic)
               let meetingTime = null;
               let hasValidDate = false;
 
               if (b.booked_slot) {
                 meetingTime = new Date(b.booked_slot);
+              } else if (b.selected_date) {
+                meetingTime = new Date(b.selected_date);
               } else if (
                 b.preferred_date &&
                 b.preferred_date !== "null" &&
                 b.preferred_time
               ) {
-                meetingTime = new Date(
-                  `${b.preferred_date} ${b.preferred_time}`,
-                );
+                meetingTime = new Date(`${b.preferred_date} ${b.preferred_time}`);
               }
 
               if (meetingTime && !isNaN(meetingTime.getTime())) {
@@ -82,7 +82,7 @@ export default function BookingsScreen({ onLogout }) {
               } else if (lowerStatus === "rescheduled") {
                 mappedStatus = "Rescheduled";
               }
-              // 2. If it has a real date, calculate dynamically
+              // 2. If it has a real date, calculate dynamic scheduling state
               else if (hasValidDate) {
                 const diffMs = meetingTime.getTime() - now.getTime();
                 const diffHours = diffMs / (1000 * 60 * 60);
@@ -128,7 +128,7 @@ export default function BookingsScreen({ onLogout }) {
                   "General Consultation",
                 source: b.source || "Website AI Front Desk",
                 display_time: finalDisplayTime,
-                booked_slot: b.booked_slot,
+                booked_slot: b.booked_slot || b.selected_date,
                 status: mappedStatus,
                 calendar_sync:
                   b.calendar_sync ||
@@ -139,20 +139,16 @@ export default function BookingsScreen({ onLogout }) {
                 timestamp:
                   b.timestamp ||
                   b.conversation_ended_at ||
-                  b.conversation_started_at,
+                  b.conversation_started_at ||
+                  b.last_interaction_at,
                 ...b,
               };
             })
-            // STRICT PARITY WITH HOME SCREEN: Filter out any "Not Scheduled" or "Pending Scheduling"
-            // unless they are explicitly marked as completed/cancelled.
+            // STRICT PARITY WITH HOME SCREEN: Explicitly filter only valid bookings or terminal states
             .filter((b) => {
-              const isTerminal = [
-                "Completed",
-                "Cancelled",
-                "No-show",
-                "Rescheduled",
-              ].includes(b.status);
-              return b.display_time !== "Not Scheduled" || isTerminal;
+              const isBooked = b.booking_status === "Meeting Booked" || !!b.booked_slot || !!b.selected_date;
+              const isTerminal = ["Completed", "Cancelled", "No-show", "Rescheduled"].includes(b.status);
+              return isBooked || isTerminal;
             })
             .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
@@ -165,7 +161,7 @@ export default function BookingsScreen({ onLogout }) {
       (error) => {
         console.error("Error fetching live bookings:", error);
         setIsLoading(false);
-      },
+      }
     );
 
     return () => unsubscribe();
@@ -186,15 +182,15 @@ export default function BookingsScreen({ onLogout }) {
   }, [bookings, searchTerm, activeTab]);
 
   // --- KPI CALCULATIONS ---
-  const totalBookingsCount = bookings.length; // Synchronized Total (Pending are filtered out)
+  const totalBookingsCount = bookings.length; // Synchronized Total
   const activePipelineCount = bookings.filter((b) =>
-    ["Upcoming", "Near upcoming", "Rescheduled"].includes(b.status),
+    ["Upcoming", "Near upcoming", "Rescheduled"].includes(b.status)
   ).length;
   const completedCount = bookings.filter(
-    (b) => b.status === "Completed",
+    (b) => b.status === "Completed"
   ).length;
   const noShowCount = bookings.filter(
-    (b) => b.status === "No-show" || b.status === "Cancelled",
+    (b) => b.status === "No-show" || b.status === "Cancelled"
   ).length;
 
   const getStatusStyles = (status) => {

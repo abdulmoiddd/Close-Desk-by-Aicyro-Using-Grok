@@ -1,6 +1,8 @@
+// src/pages/api/login.js
 import { ref, get } from "firebase/database";
 import { withApiLogger } from "../../lib/apiMiddleware";
-import { db } from "../../lib/firebase"; // Adjust this relative path based on your folder structure
+import { db } from "../../lib/firebase"; 
+import { recordAuditTrail } from "../../lib/auditTracer"; // 🔥 TICKET 14
 
 async function handler(req, res, apiLogger) {
   if (req.method !== "POST") {
@@ -22,12 +24,27 @@ async function handler(req, res, apiLogger) {
 
       // Iterate through the "1", "2" keys to find a match
       const isValidUser = Object.values(users).some(
-        (user) => user.name === username && user.password === password,
+        (user) => user && user.name === username && user.password === password,
       );
 
       if (isValidUser) {
+        // 🚨 TICKET 14: Log Successful Login
+        recordAuditTrail(apiLogger, "login_success", {
+          who: username,
+          target: "pulse_dashboard",
+          status: "success"
+        });
+        
         return res.status(200).json({ success: true });
       } else {
+        // 🚨 TICKET 14: Log Failed Login Attempt
+        recordAuditTrail(apiLogger, "login_failure", {
+          who: username,
+          target: "pulse_dashboard",
+          status: "failed",
+          reason: "Invalid credentials"
+        });
+        
         return res.status(401).json({ error: "Invalid credentials" });
       }
     } else {

@@ -1,51 +1,57 @@
-import OpenAI from "openai";
+// src/pages/api/generate-email.js
 import { withApiLogger } from "../../lib/apiMiddleware";
+import { executeIntegrationWithTrace } from "../../lib/integrationTracer";
 
 async function handler(req, res, apiLogger) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed." });
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  const { name, business_type, time } = req.body;
+  
+  const WEBHOOK_URL = process.env.MAKE_COM_EMAIL_WEBHOOK_URL;
+  const SECRET_TOKEN = process.env.WEBHOOK_SECRET;
+
+  if (!WEBHOOK_URL) {
+    return res.status(500).json({ error: "Email Integration not configured" });
   }
+
+  // 1. Define the Integration parameters
+  const integrationConfig = {
+    integration_name: "Make.com_Email_Automation",
+    operation: "Trigger_Confirmation_Email",
+    retryOptions: { maxAttempts: 3, delayMs: 2000 } // Will try up to 3 times if Make.com drops it
+  };
+
+  const fetchOptions = {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${SECRET_TOKEN}` // The tracer will automatically hide this in logs!
+    },
+    body: JSON.stringify({ name, business_type, time })
+  };
 
   try {
-    const { name, business_type, time } = req.body;
-    const apiKey = process.env.OPENAI_API_KEY;
+    // 2. Execute the third-party call through the Tracer
+    const result = await executeIntegrationWithTrace(
+      apiLogger, 
+      integrationConfig, 
+      WEBHOOK_URL, 
+      fetchOptions
+    );
 
-    if (!apiKey) {
-      return res.status(500).json({ error: "OpenAI API Key missing" });
-    }
-
-    const openai = new OpenAI({ apiKey });
-
-    const systemPrompt = {
-      role: "system",
-      content: `You are an expert sales assistant for Aicyro. Your job is to write a highly personalized, warm, and brief confirmation email for a booked demo/audit.
-      
-Force strict raw JSON output:
-{
-  "subject": "The email subject line",
-  "body": "The email body in plain text. Acknowledge their business type, confirm the meeting time, and express excitement to show them how Aicyro can capture more leads."
-}`,
-    };
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      response_format: { type: "json_object" },
-      messages: [
-        systemPrompt,
-        {
-          role: "user",
-          content: `Lead Name: ${name || "There"}\nBusiness Type: ${business_type || "Your Business"}\nBooked Time: ${time}`,
-        },
-      ],
-      temperature: 0.7,
-      max_tokens: 250,
+    // If we make it here, the webhook succeeded (even if it took 2 retries to do it!)
+    return res.status(200).json({ 
+      success: true, 
+      messageId: result.id || "webhook_accepted",
+      subject: result.generated_subject,
+      body: result.generated_body
     });
 
-    const aiResponse = JSON.parse(completion.choices[0].message.content);
-    return res.status(200).json(aiResponse);
   } catch (error) {
-    apiLogger.error("Email Generation Error:", error);
-    return res.status(500).json({ error: "Failed to generate email" });
+    // We don't need to apiLogger.error() here, because executeIntegrationWithTrace
+    // already logged the exact external failure perfectly!
+    return res.status(502).json({ error: "Failed to dispatch email via external provider." });
   }
 }
+
 export default withApiLogger(handler, "Generate-Email-API");

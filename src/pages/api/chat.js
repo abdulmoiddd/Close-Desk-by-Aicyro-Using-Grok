@@ -4,6 +4,7 @@ import { db } from "../../lib/firebase";
 import { ref, set, get, update, push } from "firebase/database";
 import { getMasterRuleBook, POLICY_VERSION } from "../../lib/ruleBook";
 import { withApiLogger } from "../../lib/apiMiddleware";
+import { executeRagWithTrace } from "../../lib/ragTracer";
 
 import { traceAiExecution, safeParseAiResponse } from "../../lib/aiTracer";
 import { withRetryTrace } from "../../lib/retryTracer"; // 🔥 TICKET 12: Added Retry Tracer
@@ -23,6 +24,8 @@ const MAX_REQUESTS_PER_WINDOW = 15;
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 const isValidPhone = (phone) => /^[\d\+\-\(\)\s]{7,20}$/.test(phone);
 const isValidWebsite = (url) => /^[^\s]+\.[^\s]+$/.test(url);
+
+
 
 function validateAndSanitizePayload(aiResponse) {
   if (!aiResponse || typeof aiResponse !== "object") {
@@ -188,6 +191,17 @@ async function handler(req, res, apiLogger) {
       declined_fields: Array.from(new Set([...(current_lead_data.declined_fields || []), ...(existingProspect.privacy_patch || [])])),
     };
 
+   // 🔥 TICKET 6: RAG Tracer Integration
+   const ragContext = { query_id: `rag_${session_id}_${Date.now()}`, knowledge_version: "v1.0" };
+    
+   // Because your Vector DB isn't fully built yet (data comes from frontend), 
+   // we wrap a simulated promise so the logs work perfectly without crashing!
+   const mockVectorSearch = Promise.resolve(
+     retrievedKnowledge ? [{ id: "frontend_provided_doc", score: 0.95 }] : []
+   );
+   await executeRagWithTrace(apiLogger, ragContext, mockVectorSearch);
+
+   
     let instructions, botConfig;
     try {
       const ruleBook = await getMasterRuleBook("text", mergedLeadData, retrievedKnowledge);

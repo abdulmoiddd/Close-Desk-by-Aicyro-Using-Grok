@@ -4,6 +4,8 @@ import { withApiLogger } from "../../lib/apiMiddleware";
 import { db } from "../../lib/firebase";
 import { ref, update, get } from "firebase/database";
 import { traceAiExecution } from "../../lib/aiTracer"; // 🔥 Integrates Ticket 5 Tracer for the abandoned summaries
+import { executeDbWithTrace } from "../../lib/dbTracer";
+
 
 async function handler(req, res, apiLogger) {
   // ==========================================
@@ -51,7 +53,8 @@ async function handler(req, res, apiLogger) {
     try {
       // 1. Check existing state in the database
       const leadRef = ref(db, `leads/${lead_id}`);
-      const snapshot = await get(leadRef);
+      // 🔥 Wrapped the Read operation
+      const snapshot = await executeDbWithTrace(apiLogger, "read", `leads/${lead_id}`, get(leadRef));
       const exists = snapshot.exists();
       const existingData = exists ? snapshot.val() : {};
 
@@ -139,8 +142,9 @@ async function handler(req, res, apiLogger) {
         context: { lead_id, session_id, destination: "firebase_db" }
       });
 
-      // 3. Save to Firebase
-      await update(leadRef, data);
+     // 3. Save to Firebase
+      // 🔥 Wrapped the Update operation
+      await executeDbWithTrace(apiLogger, "update", `leads/${lead_id}`, update(leadRef, data));
 
       // 🚨 TICKET 9: lead_routing_success
       apiLogger.info("lead_lifecycle", "lead_routing_success", {
